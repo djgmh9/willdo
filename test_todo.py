@@ -227,6 +227,66 @@ class CLITests(unittest.TestCase):
             cli.run()
         return output.getvalue()
 
+    def test_display_numbers_hide_internal_id_gaps(self) -> None:
+        storage = Mock(spec=TaskStorage)
+        cli = TodoCLI(TodoEngine([Task(3, "Clean Room"), Task(2, "Buy Milk")]), storage)
+        output = self.run_cli(cli, ["q"])
+        self.assertIn("  1. [ ] Buy Milk\n  2. [ ] Clean Room", output)
+        self.assertNotIn("  3. [ ]", output)
+        self.assertEqual([task.id for task in cli.engine.list_tasks()], [2, 3])
+        storage.save.assert_not_called()
+
+    def test_deleting_first_task_renumbers_remaining_tasks(self) -> None:
+        storage = Mock(spec=TaskStorage)
+        cli = TodoCLI(TodoEngine([Task(2, "Buy Milk"), Task(3, "Clean Room")]), storage)
+        output = self.run_cli(cli, ["delete 1", "d", "1", "q"])
+        self.assertIn("  1. [ ] Clean Room", output)
+        self.assertEqual(cli.engine.list_tasks(), [])
+        self.assertEqual([call.args[0] for call in storage.save.call_args_list], [
+            [Task(3, "Clean Room")], [],
+        ])
+
+    def test_edit_and_complete_resolve_display_numbers(self) -> None:
+        for commands in (["edit 2", "Updated", "complete 1", "q"],
+                         ["e", "2", "Updated", "c", "1", "q"]):
+            with self.subTest(commands=commands):
+                storage = Mock(spec=TaskStorage)
+                cli = TodoCLI(TodoEngine([Task(4, "First"), Task(9, "Second")]), storage)
+                self.run_cli(cli, commands)
+                expected = [Task(4, "First", True), Task(9, "Updated")]
+                self.assertEqual(cli.engine.list_tasks(), expected)
+                storage.save.assert_called_with(expected)
+
+    def test_invalid_display_numbers_never_select_by_internal_id(self) -> None:
+        for command in ("edit", "delete", "complete"):
+            for number in ("0", "-1", "3", "9", "abc", "1.5", "1 2"):
+                with self.subTest(command=command, number=number):
+                    storage = Mock(spec=TaskStorage)
+                    tasks = [Task(4, "First"), Task(9, "Second")]
+                    cli = TodoCLI(TodoEngine(tasks), storage)
+                    output = self.run_cli(cli, [f"{command} {number}", "q"])
+                    self.assertIn("Error:", output)
+                    self.assertEqual(cli.engine.list_tasks(), tasks)
+                    storage.save.assert_not_called()
+
+    def test_empty_list_rejects_display_selection(self) -> None:
+        storage = Mock(spec=TaskStorage)
+        cli = TodoCLI(TodoEngine(), storage)
+        output = self.run_cli(cli, ["delete 1", "complete 1", "edit 1", "q"])
+        self.assertEqual(output.count("There are no tasks to select."), 3)
+        storage.save.assert_not_called()
+
+    def test_failed_delete_preserves_display_mapping_for_retry(self) -> None:
+        storage = Mock(spec=TaskStorage)
+        storage.save.side_effect = [StorageError("Disk full"), None]
+        cli = TodoCLI(TodoEngine([Task(4, "First"), Task(9, "Second")]), storage)
+        output = self.run_cli(cli, ["delete 1", "delete 1", "q"])
+        self.assertIn("Change was not applied", output)
+        self.assertEqual(cli.engine.list_tasks(), [Task(9, "Second")])
+        self.assertEqual([call.args[0] for call in storage.save.call_args_list], [
+            [Task(9, "Second")], [Task(9, "Second")],
+        ])
+
     def test_full_workflow_autosaves_each_change(self) -> None:
         storage = Mock(spec=TaskStorage)
         cli = TodoCLI(TodoEngine(), storage)
